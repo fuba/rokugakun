@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rokugakun — Recordings</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/hls.min.js"></script>
+</head>
+<body>
+  <header>
+    <span class="logo" aria-hidden="true"></span>
+    <h1 id="title">Rokugakun</h1>
+    <button id="back" class="hidden">← Back</button>
+  </header>
+
+  <main>
+    <section id="list"></section>
+
+    <section id="player" class="hidden">
+      <div id="banner" class="banner hidden"></div>
+      <video id="video" controls playsinline></video>
+      <div class="bar">
+        <button id="snap">📷 Screenshot</button>
+        <span class="sep"></span>
+        <button id="setin">IN</button>
+        <span id="inout">IN -- / OUT --</span>
+        <button id="setout">OUT</button>
+        <label><input type="checkbox" id="reenc" checked> Accurate (re-encode)</label>
+        <button id="clip" class="primary">✂ Clip</button>
+        <span id="clipmsg"></span>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

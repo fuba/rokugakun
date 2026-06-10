@@ -1,0 +1,51 @@
+[package]
+name = "launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "launcher"
+path = "src/lib.rs"
+
+[[bin]]
+name = "launcher"
+path = "src/main.rs"
+
+[dependencies]
+rec-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+crossbeam-channel = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+regex = "1"
+eframe = "0.28"
+egui = "0.28"
+rfd = "0.14"
+tiny_http = "0.12"
+webbrowser = "1"
+
+# the recording engine (capture/encode/mux pipeline) is reused in-process
+[target.'cfg(windows)'.dependencies.recorder]
+path = "../recorder"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_Graphics_Gdi",
+]
+
+[build-dependencies]
+winresource = "0.1"

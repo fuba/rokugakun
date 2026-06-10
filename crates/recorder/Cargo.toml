@@ -1,0 +1,63 @@
+[package]
+name = "recorder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# lib holds the testable pipeline modules (segment writer, mux glue, state machine);
+# main.rs is a thin entry point.
+[lib]
+name = "recorder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "recorder"
+path = "src/main.rs"
+
+[dependencies]
+rec-core = { workspace = true }
+ts-mux = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+    "implement",
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Performance",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[target.'cfg(windows)'.dependencies.windows-core]
+version = "0.58"
+
+[dev-dependencies]
+tempfile = "3"
