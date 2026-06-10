@@ -21,7 +21,7 @@
 
 ## 使い方
 
-[Releases](../../releases) から zip をダウンロードして展開し、`launcher.exe` をダブルクリックするだけです。
+[Releases](../../releases) から zip をダウンロードして展開し、`rokugakun.exe` をダブルクリックするだけです。
 
 1. 「📁 ファイルを選択...」でゲームの exe / ショートカットを登録（または「⏵ 起動中アプリから登録...」で自動録画を ON に）
 2. 「▶ 録画して起動」を押すとゲームが起動し、ウィンドウを検出して録画が始まります
@@ -33,10 +33,11 @@
 ### CLI
 
 ```
-launcher.exe selftest [秒]   # ffplay のテスト映像を録画するセルフテスト
-launcher.exe serve [秒]      # ビューワサーバーのみ起動
-launcher.exe list-apps       # 録画対象として検出できる起動中アプリ一覧
+rokugakun.exe selftest [秒]   # ffplay のテスト映像を録画するセルフテスト
+rokugakun.exe serve [秒]      # ビューワサーバーのみ起動
+rokugakun.exe list-apps      # 録画対象として検出できる起動中アプリ一覧
 ```
+（ソースからビルドした場合の実行ファイル名は `launcher.exe` です）
 
 ## ソースからビルド
 
