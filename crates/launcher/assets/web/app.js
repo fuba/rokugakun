@@ -3,18 +3,22 @@
 const $ = (id) => document.getElementById(id);
 const listEl = $("list"), playerEl = $("player"), videoEl = $("video");
 const titleEl = $("title"), backEl = $("back"), bannerEl = $("banner");
+const stageEl = $("stage");
 
 let hls = null;
 let curGame = null;          // {id, name}
 let curSession = null;       // session id
+let curLabel = "clip";       // label used for screenshot/clip filenames
+let clipMode = false;
 let inMs = null, outMs = null;
+let scrubbing = null;        // "seek" | "in" | "out" | null
 
 const hevcOk = (window.MediaSource &&
   MediaSource.isTypeSupported('video/mp4; codecs="hvc1.1.6.L150.B0"'));
 
 // ---- routing --------------------------------------------------------------
 window.addEventListener("hashchange", route);
-window.addEventListener("DOMContentLoaded", route);
+window.addEventListener("DOMContentLoaded", () => { wirePlayer(); route(); });
 backEl.onclick = () => {
   if (curSession && curGame) { location.hash = `#/game/${curGame.id}`; }
   else { location.hash = "#/"; }
@@ -29,10 +33,10 @@ function route() {
   else { showGames(); }
 }
 
-// ---- views ----------------------------------------------------------------
+// ---- list views -----------------------------------------------------------
 async function showGames() {
   curSession = null; curGame = null;
-  titleEl.textContent = "Rokugakun";
+  titleEl.textContent = "rokugakun";
   backEl.classList.add("hidden");
   playerEl.classList.add("hidden");
   listEl.classList.remove("hidden");
@@ -43,8 +47,6 @@ async function showGames() {
   ]);
   listEl.innerHTML = "";
 
-  // Recent recordings — newest first, across all games (still listed after a
-  // game is removed from the launcher).
   const rh = document.createElement("h2"); rh.textContent = "Recent recordings";
   listEl.appendChild(rh);
   if (!recent.length) {
@@ -101,7 +103,17 @@ async function showPlayer(sid) {
   backEl.classList.remove("hidden");
   listEl.classList.add("hidden");
   playerEl.classList.remove("hidden");
-  inMs = outMs = null; updateInOut();
+  resetClip();
+  setClipMode(false);
+  $("shotmsg").textContent = "";
+  stageEl.classList.add("show-controls"); // visible until playback starts
+
+  // Resolve a friendly label (game name) for screenshot/clip filenames.
+  curLabel = (curGame && curGame.name) || "clip";
+  fetch("/api/sessions").then(r => r.json()).then(list => {
+    const m = (list || []).find(s => s.id === sid);
+    if (m) { curLabel = m.game_name; titleEl.textContent = m.game_name; }
+  }).catch(() => {});
 
   const useH264 = !hevcOk;
   const m3u8 = `${useH264 ? "/hls264" : "/hls"}/session/${encodeURIComponent(sid)}.m3u8`;
@@ -110,19 +122,15 @@ async function showPlayer(sid) {
     ? "This device can't decode HEVC directly — transcoding to H.264 (the first load takes a while)…"
     : "Preparing the stream (only the first load takes a moment)…";
 
-  // Poll until the server has produced the playlist (re-segmentation may take a moment).
   await waitForPlaylist(m3u8);
   bannerEl.classList.add("hidden");
   attach(m3u8);
 }
 
-// ---- playback -------------------------------------------------------------
+// ---- stream ---------------------------------------------------------------
 async function waitForPlaylist(url) {
   for (let i = 0; i < 150; i++) { // up to ~30s
-    try {
-      const r = await fetch(url, { cache: "no-store" });
-      if (r.ok) return;
-    } catch (_) {}
+    try { const r = await fetch(url, { cache: "no-store" }); if (r.ok) return; } catch (_) {}
     await sleep(200);
   }
 }
@@ -133,8 +141,7 @@ function attach(m3u8) {
     hls.loadSource(m3u8);
     hls.attachMedia(videoEl);
     hls.on(Hls.Events.ERROR, (_e, d) => {
-      if (d.fatal) bannerEl.classList.remove("hidden"),
-        bannerEl.textContent = "Playback error: " + d.details;
+      if (d.fatal) { bannerEl.classList.remove("hidden"); bannerEl.textContent = "Playback error: " + d.details; }
     });
   } else if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
     videoEl.src = m3u8; // Safari native
@@ -149,49 +156,181 @@ function stopPlayer() {
   videoEl.removeAttribute("src"); videoEl.load();
 }
 
-// double-click to toggle fullscreen
-videoEl.addEventListener("dblclick", () => {
-  if (document.fullscreenElement) document.exitFullscreen();
-  else videoEl.requestFullscreen().catch(() => {});
-});
+// ---- custom player controls ----------------------------------------------
+function wirePlayer() {
+  const seek = $("seek");
 
-// ---- screenshot (client-side canvas) --------------------------------------
-$("snap").onclick = () => {
-  if (!videoEl.videoWidth) return;
-  const c = document.createElement("canvas");
-  c.width = videoEl.videoWidth; c.height = videoEl.videoHeight;
-  c.getContext("2d").drawImage(videoEl, 0, 0);
-  c.toBlob((b) => {
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(b);
-    a.download = `shot_${Date.now()}.png`;
-    a.click();
-  }, "image/png");
-};
+  $("play").onclick = togglePlay;
+  videoEl.addEventListener("click", togglePlay);
+  videoEl.addEventListener("dblclick", toggleFullscreen);
+  $("full").onclick = toggleFullscreen;
 
-// ---- clip -----------------------------------------------------------------
-$("setin").onclick = () => { inMs = Math.floor(videoEl.currentTime * 1000); updateInOut(); };
-$("setout").onclick = () => { outMs = Math.floor(videoEl.currentTime * 1000); updateInOut(); };
-function updateInOut() {
-  $("inout").textContent = `IN ${inMs==null?"--":fmtDur(inMs)} / OUT ${outMs==null?"--":fmtDur(outMs)}`;
-}
-$("clip").onclick = async () => {
-  if (inMs == null || outMs == null || outMs <= inMs) { $("clipmsg").textContent = "Set IN and OUT first"; return; }
-  $("clipmsg").textContent = "Clipping…";
-  const body = { session_id: curSession, start_ms: inMs, end_ms: outMs, mode: $("reenc").checked ? "reencode" : "copy" };
-  const res = await fetch("/api/clip", { method: "POST", body: JSON.stringify(body) }).then(r => r.json());
-  if (!res.job) { $("clipmsg").textContent = "Failed"; return; }
-  for (let i = 0; i < 1800; i++) {
-    const st = await fetch(`/api/clip/${res.job}`).then(r => r.json());
-    if (st.status === "done") {
-      $("clipmsg").innerHTML = `Done: <a class="dl" href="${st.url}" download>Download</a>`;
-      return;
+  videoEl.addEventListener("play", () => { $("play").textContent = "⏸"; stageEl.classList.remove("show-controls"); });
+  videoEl.addEventListener("pause", () => { $("play").textContent = "▶"; stageEl.classList.add("show-controls"); });
+  videoEl.addEventListener("timeupdate", renderProgress);
+  videoEl.addEventListener("progress", renderProgress);
+  videoEl.addEventListener("durationchange", renderProgress);
+  videoEl.addEventListener("loadedmetadata", renderProgress);
+
+  $("mute").onclick = () => { videoEl.muted = !videoEl.muted; reflectVolume(); };
+  $("vol").oninput = (e) => { videoEl.muted = false; videoEl.volume = parseFloat(e.target.value); reflectVolume(); };
+
+  // scrub / clip-handle dragging on the shared timeline
+  seek.addEventListener("pointerdown", (e) => {
+    const t = e.target;
+    if (t === $("handleIn")) scrubbing = "in";
+    else if (t === $("handleOut")) scrubbing = "out";
+    else scrubbing = "seek";
+    seek.setPointerCapture(e.pointerId);
+    onScrub(e);
+  });
+  seek.addEventListener("pointermove", (e) => { if (scrubbing) onScrub(e); });
+  seek.addEventListener("pointerup", (e) => { scrubbing = null; try { seek.releasePointerCapture(e.pointerId); } catch (_) {} });
+
+  // clip controls
+  $("clipToggle").onclick = () => setClipMode(!clipMode);
+  $("setin").onclick = () => { inMs = Math.floor(videoEl.currentTime * 1000); clampClip(); renderClip(); };
+  $("setout").onclick = () => { outMs = Math.floor(videoEl.currentTime * 1000); clampClip(); renderClip(); };
+  $("playclip").onclick = () => { if (inMs != null) { videoEl.currentTime = inMs / 1000; videoEl.play(); } };
+  $("export").onclick = exportClip;
+
+  // screenshot -> POST to the app daemon (saved in the app-configured folder)
+  $("snap").onclick = saveScreenshot;
+
+  // keyboard shortcuts
+  document.addEventListener("keydown", (e) => {
+    if (playerEl.classList.contains("hidden")) return;
+    if (e.target.tagName === "INPUT") return;
+    switch (e.key) {
+      case " ": case "k": e.preventDefault(); togglePlay(); break;
+      case "f": toggleFullscreen(); break;
+      case "m": videoEl.muted = !videoEl.muted; reflectVolume(); break;
+      case "c": setClipMode(!clipMode); break;
+      case "s": saveScreenshot(); break;
+      case "i": inMs = Math.floor(videoEl.currentTime * 1000); clampClip(); renderClip(); break;
+      case "o": outMs = Math.floor(videoEl.currentTime * 1000); clampClip(); renderClip(); break;
+      case "ArrowLeft": videoEl.currentTime = Math.max(0, videoEl.currentTime - 5); break;
+      case "ArrowRight": videoEl.currentTime += 5; break;
     }
-    if (st.status === "failed") { $("clipmsg").textContent = "Failed: " + (st.error||""); return; }
+  });
+
+  reflectVolume();
+}
+
+function togglePlay() { if (videoEl.paused) videoEl.play(); else videoEl.pause(); }
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else stageEl.requestFullscreen().catch(() => {});
+}
+function reflectVolume() {
+  $("mute").textContent = (videoEl.muted || videoEl.volume === 0) ? "🔇" : "🔊";
+  $("vol").value = videoEl.muted ? 0 : videoEl.volume;
+}
+
+function dur() { return videoEl.duration && isFinite(videoEl.duration) ? videoEl.duration : 0; }
+
+function onScrub(e) {
+  const seek = $("seek");
+  const rect = seek.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  const ms = frac * dur() * 1000;
+  if (scrubbing === "seek") { videoEl.currentTime = ms / 1000; }
+  else if (scrubbing === "in") { inMs = ms; clampClip(); }
+  else if (scrubbing === "out") { outMs = ms; clampClip(); }
+  renderProgress(); renderClip();
+}
+
+function renderProgress() {
+  const d = dur();
+  const cur = videoEl.currentTime || 0;
+  const pf = d ? (cur / d) * 100 : 0;
+  $("played").style.width = pf + "%";
+  $("thumb").style.left = pf + "%";
+  try {
+    if (videoEl.buffered.length) {
+      const end = videoEl.buffered.end(videoEl.buffered.length - 1);
+      $("buffered").style.width = (d ? (end / d) * 100 : 0) + "%";
+    }
+  } catch (_) {}
+  $("time").textContent = `${fmtClock(cur)} / ${fmtClock(d)}`;
+}
+
+// ---- clip mode ------------------------------------------------------------
+function setClipMode(on) {
+  clipMode = on;
+  $("clipToggle").classList.toggle("active", on);
+  $("clipPanel").classList.toggle("hidden", !on);
+  $("clipRange").classList.toggle("hidden", !on);
+  $("handleIn").classList.toggle("hidden", !on);
+  $("handleOut").classList.toggle("hidden", !on);
+  if (on && inMs == null && outMs == null) {
+    // default selection: a 15s window around the current time
+    const cur = videoEl.currentTime * 1000;
+    inMs = Math.max(0, cur - 5000);
+    outMs = cur + 10000;
+    clampClip();
+  }
+  renderClip();
+}
+
+function resetClip() { inMs = null; outMs = null; $("clipmsg").textContent = ""; }
+
+function clampClip() {
+  const dMs = dur() * 1000;
+  if (inMs != null) inMs = Math.max(0, Math.min(inMs, dMs || inMs));
+  if (outMs != null) outMs = Math.max(0, Math.min(outMs, dMs || outMs));
+  if (inMs != null && outMs != null && outMs < inMs) { const t = inMs; inMs = outMs; outMs = t; }
+}
+
+function renderClip() {
+  if (!clipMode) return;
+  const d = dur() * 1000;
+  const inf = (inMs != null && d) ? (inMs / d) * 100 : 0;
+  const outf = (outMs != null && d) ? (outMs / d) * 100 : 100;
+  $("clipRange").style.left = inf + "%";
+  $("clipRange").style.width = Math.max(0, outf - inf) + "%";
+  $("handleIn").style.left = inf + "%";
+  $("handleOut").style.left = outf + "%";
+  const len = (inMs != null && outMs != null) ? Math.max(0, outMs - inMs) : 0;
+  $("clipInfo").textContent =
+    `IN ${inMs == null ? "--" : fmtClock(inMs/1000)} · OUT ${outMs == null ? "--" : fmtClock(outMs/1000)} · length ${fmtClock(len/1000)}`;
+}
+
+async function exportClip() {
+  if (inMs == null || outMs == null || outMs <= inMs) { $("clipmsg").textContent = "Set IN and OUT first"; return; }
+  $("clipmsg").textContent = "Exporting…";
+  const body = { session_id: curSession, start_ms: Math.floor(inMs), end_ms: Math.floor(outMs), mode: $("reenc").checked ? "reencode" : "copy" };
+  const res = await fetch("/api/clip", { method: "POST", body: JSON.stringify(body) }).then(r => r.json()).catch(() => ({}));
+  if (!res.job) { $("clipmsg").textContent = "Failed to start"; return; }
+  for (let i = 0; i < 1800; i++) {
+    const st = await fetch(`/api/clip/${res.job}`).then(r => r.json()).catch(() => ({}));
+    if (st.status === "done") { $("clipmsg").innerHTML = `Done: <a class="dl" href="${st.url}" download>Download</a>`; return; }
+    if (st.status === "failed") { $("clipmsg").textContent = "Failed: " + (st.error || ""); return; }
     await sleep(1000);
   }
   $("clipmsg").textContent = "Timed out";
-};
+}
+
+// ---- screenshot (sent to the app daemon, saved in the configured folder) --
+async function saveScreenshot() {
+  if (!videoEl.videoWidth) { $("shotmsg").textContent = "No frame to capture yet."; return; }
+  $("shotmsg").textContent = "Saving screenshot…";
+  const c = document.createElement("canvas");
+  c.width = videoEl.videoWidth; c.height = videoEl.videoHeight;
+  c.getContext("2d").drawImage(videoEl, 0, 0);
+  c.toBlob(async (blob) => {
+    if (!blob) { $("shotmsg").textContent = "Capture failed."; return; }
+    try {
+      const r = await fetch(`/api/screenshot?name=${encodeURIComponent(curLabel)}`, {
+        method: "POST", headers: { "Content-Type": "image/png" }, body: blob,
+      });
+      const j = await r.json();
+      $("shotmsg").textContent = j.ok ? `Screenshot saved: ${j.path}` : "Save failed.";
+    } catch (e) {
+      $("shotmsg").textContent = "Save failed: " + e;
+    }
+  }, "image/png");
+}
 
 // ---- helpers --------------------------------------------------------------
 function card(name, meta) {
@@ -212,5 +351,11 @@ function fmtDur(ms) {
   const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60;
   const p = (n) => String(n).padStart(2, "0");
   return h > 0 ? `${h}:${p(m)}:${p(ss)}` : `${m}:${p(ss)}`;
+}
+function fmtClock(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+  const p = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

@@ -30,7 +30,7 @@ fn main() -> eframe::Result<()> {
         if args.get(1).map(String::as_str) == Some("serve") {
             let paths = AppPaths::default_layout();
             let cfg = AppConfig::load_or_default(&paths.config_path).unwrap_or_default();
-            let s = server::start(paths.db_path, cfg.storage_root, ffmpeg_path())
+            let s = server::start(paths.db_path, cfg.storage_root, cfg.screenshot_dir, ffmpeg_path())
                 .expect("server start");
             println!("serving: {}  (LAN: {})", s.url(), s.lan_url().unwrap_or_default());
             std::thread::sleep(std::time::Duration::from_secs(args.get(2).and_then(|x| x.parse().ok()).unwrap_or(600)));
@@ -62,7 +62,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "Rokugakun — Game Auto-Recorder",
+        "rokugakun — game auto-recorder",
         options,
         Box::new(|cc| {
             install_japanese_fonts(&cc.egui_ctx);
@@ -375,6 +375,25 @@ impl LauncherApp {
             match self.config.save(&self.config_path) {
                 Ok(()) => self.message = format!("Storage folder changed: {}", self.config.storage_root.display()),
                 Err(e) => self.message = format!("Failed to save the storage folder: {e}"),
+            }
+        }
+    }
+
+    /// Native folder picker for the web-viewer screenshot directory; persists.
+    fn pick_screenshot_folder(&mut self) {
+        let start = if self.config.screenshot_dir.is_dir() {
+            self.config.screenshot_dir.clone()
+        } else {
+            std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default()
+        };
+        if let Some(dir) = rfd::FileDialog::new().set_directory(start).pick_folder() {
+            self.config.screenshot_dir = dir;
+            match self.config.save(&self.config_path) {
+                Ok(()) => {
+                    self.message =
+                        format!("Screenshot folder changed: {}", self.config.screenshot_dir.display())
+                }
+                Err(e) => self.message = format!("Failed to save the screenshot folder: {e}"),
             }
         }
     }
@@ -749,7 +768,7 @@ impl eframe::App for LauncherApp {
                 ui.horizontal(|ui| {
                     let color = if is_recording { ACCENT } else { egui::Color32::from_gray(110) };
                     ui.label(egui::RichText::new("●").color(color).size(17.0));
-                    ui.heading("Rokugakun");
+                    ui.heading("rokugakun");
                     ui.add_space(10.0);
                     if ui.selectable_label(self.tab == Tab::Games, "Games").clicked() {
                         self.tab = Tab::Games;
@@ -906,7 +925,30 @@ impl LauncherApp {
     fn settings_section(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         preset_editor(ui, &mut self.config.preset);
-        ui.add_space(4.0);
+        ui.add_space(8.0);
+
+        ui.strong("Folders");
+        egui::Grid::new("folders").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            ui.label("Recordings");
+            ui.horizontal(|ui| {
+                if ui.button("Change…").clicked() {
+                    self.pick_storage_folder();
+                }
+                ui.weak(self.config.storage_root.display().to_string());
+            });
+            ui.end_row();
+            ui.label("Screenshots");
+            ui.horizontal(|ui| {
+                if ui.button("Change…").clicked() {
+                    self.pick_screenshot_folder();
+                }
+                ui.weak(self.config.screenshot_dir.display().to_string());
+            });
+            ui.end_row();
+        });
+        ui.weak("Screenshots taken in the web viewer are saved here on this PC.");
+
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button("Save").clicked() {
                 match self.config.save(&self.config_path) {
@@ -985,7 +1027,12 @@ impl LauncherApp {
     /// the browser.
     fn open_browser(&mut self, hash: &str) {
         if self.viewer_server.is_none() {
-            match server::start(self.db_path.clone(), self.config.storage_root.clone(), ffmpeg_path()) {
+            match server::start(
+                self.db_path.clone(),
+                self.config.storage_root.clone(),
+                self.config.screenshot_dir.clone(),
+                ffmpeg_path(),
+            ) {
                 Ok(s) => self.viewer_server = Some(s),
                 Err(e) => {
                     self.message = format!("Viewer server failed to start: {e}");

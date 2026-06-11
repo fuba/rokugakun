@@ -1,47 +1,77 @@
-# ロクガくん（gamerokugakun）
+# rokugakun
 
-**OBS いらずの Windows ゲーム自動録画ランチャー。** ゲームを起動するだけで、そのウィンドウとそのアプリの音声だけを自動で録画し続けます。すべてローカル完結・純 Rust 製です。
+**An OBS-free game auto-recording launcher for Windows.** Launch a game and it
+automatically records just that window and just that app's audio — all locally,
+written in pure Rust.
 
-## 特徴
+## Features
 
-- 🎮 **ゲームを登録して「録画して起動」**、または**自動録画**（対象アプリの起動を検知して自動でアタッチ）
-- 🪟 **対象ウィンドウだけ録画**（Windows.Graphics.Capture）。非フルスクリーン時はタイトルバーを除いたクライアント領域のみ。黄色い録画枠は出ません（かわりに画面右上に小さな赤い点が点滅。録画には写りません）
-- 🔊 **対象プロセスの音声だけ録音**（WASAPI process loopback）— Discord や BGM は混ざりません
-- ⚡ **HEVC (NVENC) + AAC** をハードウェアエンコードし、**MPEG-TS セグメント**（既定 1GB / 10分で切替、キーフレーム境界）として保存。muxer は依存ゼロの純 Rust 実装
-- 💾 **容量上限で自動ローテーション**（古いセグメントから削除）。SQLite で録画を管理
-- 📺 **ビューワ内蔵**: セッションをまたいで一気通貫再生（ffplay 連結再生）
-- 🌐 **ブラウザビューワ + HLS サーバー内蔵**: シークバー / ダブルクリック全画面 / 切り抜き（NVENC 再エンコード or 高速コピー）/ スクリーンショット。LAN に公開されるのでスマホからも視聴できます（HEVC 非対応ブラウザには H.264 へ自動フォールバック）
-- ⚙️ 解像度 / fps / ビットレート / レート制御などを全体・ゲーム別に設定可能。ウィンドウが設定より小さい場合は自動フィット
+- 🎮 **Register a game and "Record & Launch"**, or **auto-record** (rokugakun
+  watches for the app and starts recording the moment it launches).
+- 🪟 **Records only the target window** (Windows.Graphics.Capture). For
+  non-fullscreen apps it captures the client area only, excluding the title bar.
+  No yellow capture border — instead a small red dot blinks at the top-right of
+  the screen (it is never part of the recording).
+- 🔊 **Records only the target process's audio** (WASAPI process loopback), so
+  Discord, music, and notifications never bleed in.
+- ⚡ **Hardware HEVC (NVENC via Media Foundation) + AAC**, written to **MPEG-TS
+  segments** (1 GB / 10 min by default, split on keyframe boundaries). The muxer
+  is a dependency-free pure-Rust implementation.
+- 💾 **Capacity-capped retention** — the oldest segments are deleted once the
+  storage cap is reached. An SQLite manifest tracks everything.
+- 📺 **Built-in viewer** — play across sessions seamlessly (via ffplay's concat
+  protocol).
+- 🌐 **Built-in web viewer + HLS server** — a fully custom player with a seek
+  bar, fullscreen, volume, **clip mode** (set IN/OUT on the timeline, export via
+  NVENC re-encode or fast copy), and **screenshots saved server-side** into a
+  folder you configure in the app. The server binds to your LAN, so you can
+  watch from your phone (HEVC-incapable browsers fall back to H.264
+  automatically).
+- ⚙️ Resolution / fps / bitrate / rate control and more, configurable globally
+  or per game. When a window is smaller than the preset, the output auto-fits.
 
-## 動作環境
+## Requirements
 
-- Windows 11（Windows.Graphics.Capture / process loopback / `SetIsBorderRequired` を使用）
-- ハードウェア HEVC エンコーダを持つ GPU（NVIDIA NVENC で検証済み。Media Foundation 経由なので AMD/Intel の HEVC HW エンコーダでも動く想定）
-- **ffmpeg / ffplay**（任意・推奨）: 内蔵ビューワの再生、ブラウザ視聴（HLS 再構成）、切り抜きに使用します。`launcher.exe` と同じフォルダ、scoop（`~/scoop/apps/ffmpeg`）、または PATH から自動検出します。録画そのものには不要です
+- Windows 11 (uses Windows.Graphics.Capture, process loopback, and
+  `SetIsBorderRequired`).
+- A GPU with a hardware HEVC encoder (tested on NVIDIA NVENC; because it goes
+  through Media Foundation, AMD/Intel hardware HEVC encoders should work too).
+- **ffmpeg / ffplay** (optional but recommended): used for viewer playback,
+  browser streaming (HLS re-segmentation), and clip export. rokugakun finds them
+  next to `rokugakun.exe`, in scoop (`~/scoop/apps/ffmpeg`), or on `PATH`.
+  Recording itself does not need them.
 
-## 使い方
+## Getting started
 
-[Releases](../../releases) から zip をダウンロードして展開し、`rokugakun.exe` をダブルクリックするだけです。
+Download the zip from [Releases](../../releases), extract it, and double-click
+`rokugakun.exe`.
 
-1. 「📁 ファイルを選択...」でゲームの exe / ショートカットを登録（または「⏵ 起動中アプリから登録...」で自動録画を ON に）
-2. 「▶ 録画して起動」を押すとゲームが起動し、ウィンドウを検出して録画が始まります
-3. ゲームを終了すると録画も自動で止まります
-4. 「録画を見る」→「🌐 ブラウザで見る」でシークバー付きのリッチなビューワが開きます
+1. Click **Choose file…** to register a game's exe / shortcut (or **From running
+   apps…** to register one with auto-record turned on).
+2. Click **Record & Launch** to start the game; rokugakun detects its window and
+   begins recording.
+3. Quit the game and the recording stops automatically.
+4. Open the **Recordings** tab, or click **Web Viewer** for the rich
+   browser-based player (seek bar, clip, screenshots).
 
-録画ファイルは既定で `%USERPROFILE%\Videos\GameRecordings` に保存されます（変更可）。設定・DB・ログは `%LOCALAPPDATA%\GameRecorder` にあります。
+Recordings are written to `%USERPROFILE%\Videos\GameRecordings` by default
+(changeable in Settings). Screenshots taken in the web viewer are saved to
+`%USERPROFILE%\Pictures\Rokugakun` by default (also configurable). App
+config, the database, and logs live under `%LOCALAPPDATA%\GameRecorder`.
 
 ### CLI
 
 ```
-rokugakun.exe selftest [秒]   # ffplay のテスト映像を録画するセルフテスト
-rokugakun.exe serve [秒]      # ビューワサーバーのみ起動
-rokugakun.exe list-apps      # 録画対象として検出できる起動中アプリ一覧
+rokugakun.exe selftest [secs]   # record an ffplay test pattern end-to-end
+rokugakun.exe serve [secs]      # run only the web/HLS viewer server
+rokugakun.exe list-apps         # list running apps detectable as targets
 ```
-（ソースからビルドした場合の実行ファイル名は `launcher.exe` です）
 
-## ソースからビルド
+(When built from source the executable is named `launcher.exe`.)
 
-Rust (stable, `x86_64-pc-windows-msvc`) と MSVC Build Tools が必要です。
+## Building from source
+
+Requires Rust (stable, `x86_64-pc-windows-msvc`) and the MSVC Build Tools.
 
 ```
 cargo build --release -p launcher
@@ -52,17 +82,18 @@ cargo build --release -p launcher
 cargo test --workspace
 ```
 
-## 構成
+## Layout
 
-| crate | 内容 |
+| crate | contents |
 |---|---|
-| `crates/core` (`rec-core`) | 設定 / SQLite ストア / 容量ローテーション / ログ |
-| `crates/ts-mux` | 依存ゼロの純 Rust MPEG-TS muxer |
-| `crates/recorder` | キャプチャ（WGC/D3D11）・エンコード（MF HEVC/AAC）・mux パイプライン |
-| `crates/launcher` | egui GUI + 内蔵 Web ビューワ / HLS サーバー |
+| `crates/core` (`rec-core`) | config / SQLite store / capacity retention / logging |
+| `crates/ts-mux` | dependency-free pure-Rust MPEG-TS muxer |
+| `crates/recorder` | capture (WGC/D3D11), encode (MF HEVC/AAC), mux pipeline |
+| `crates/launcher` | egui GUI + embedded web viewer / HLS server |
 
-Web ビューワは [hls.js](https://github.com/video-dev/hls.js)（Apache-2.0）を同梱しています。
+The web viewer bundles [hls.js](https://github.com/video-dev/hls.js)
+(Apache-2.0).
 
-## ライセンス
+## License
 
 [MIT](LICENSE)

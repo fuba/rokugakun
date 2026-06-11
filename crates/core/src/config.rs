@@ -62,6 +62,10 @@ pub struct AppConfig {
     /// The active recording preset (all quality/segment/retention settings).
     #[serde(default = "default_preset")]
     pub preset: RecordingPreset,
+    /// Where the web viewer saves screenshots (server-side). Default:
+    /// `%USERPROFILE%\Pictures\Rokugakun`.
+    #[serde(default = "default_screenshot_dir")]
+    pub screenshot_dir: PathBuf,
 }
 
 fn default_preset() -> RecordingPreset {
@@ -74,6 +78,7 @@ impl Default for AppConfig {
             storage_root: default_storage_root(),
             default_preset_id: "hevc_1440p60_high".into(),
             preset: default_preset(),
+            screenshot_dir: default_screenshot_dir(),
         }
     }
 }
@@ -84,6 +89,14 @@ pub fn default_storage_root() -> PathBuf {
         .map(PathBuf::from)
         .map(|p| p.join("Videos").join("GameRecordings"))
         .unwrap_or_else(|| PathBuf::from("GameRecordings"))
+}
+
+/// Default screenshot directory: `%USERPROFILE%\Pictures\Rokugakun`.
+pub fn default_screenshot_dir() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|p| p.join("Pictures").join("Rokugakun"))
+        .unwrap_or_else(|| PathBuf::from("Screenshots"))
 }
 
 impl AppConfig {

@@ -23,6 +23,7 @@ const PREFERRED_PORT: u16 = 8787;
 struct Ctx {
     db_path: PathBuf,
     storage_root: PathBuf,
+    screenshot_dir: PathBuf,
     ffmpeg: String,
     /// HLS re-segmentation jobs already started (key: `sid` or `264:sid`).
     started: Mutex<HashSet<String>>,
@@ -65,7 +66,12 @@ impl Drop for ViewerServer {
 
 /// Start the server on a background thread pool. Tries port 8787, else a random
 /// free port.
-pub fn start(db_path: PathBuf, storage_root: PathBuf, ffmpeg: String) -> anyhow::Result<ViewerServer> {
+pub fn start(
+    db_path: PathBuf,
+    storage_root: PathBuf,
+    screenshot_dir: PathBuf,
+    ffmpeg: String,
+) -> anyhow::Result<ViewerServer> {
     // Pick a port: prefer 8787, fall back to OS-assigned.
     let port = if TcpListener::bind(("0.0.0.0", PREFERRED_PORT)).is_ok() {
         PREFERRED_PORT
@@ -80,6 +86,7 @@ pub fn start(db_path: PathBuf, storage_root: PathBuf, ffmpeg: String) -> anyhow:
     let ctx = Arc::new(Ctx {
         db_path,
         storage_root,
+        screenshot_dir,
         ffmpeg,
         started: Mutex::new(HashSet::new()),
         clips: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -146,6 +153,7 @@ fn handle(req: &mut tiny_http::Request, ctx: &Ctx) -> ResponseBox {
         (tiny_http::Method::Get, ["api", "clip", job]) => api_clip_status(ctx, job),
         (tiny_http::Method::Get, ["clips", file]) => serve_clip(ctx, file),
         (tiny_http::Method::Get, ["api", "frame"]) => api_frame(ctx, &raw),
+        (tiny_http::Method::Post, ["api", "screenshot"]) => api_screenshot(req, ctx),
 
         _ => text(404, "not found"),
     }
@@ -377,6 +385,47 @@ fn api_clip(req: &mut tiny_http::Request, ctx: &Ctx) -> ResponseBox {
     json_response(&serde_json::json!({"job": job}))
 }
 
+/// Receive a PNG screenshot from the web viewer and save it under the
+/// app-configured screenshot directory. Body is the raw PNG; `?name=` gives a
+/// label (game name / timestamp) used in the filename.
+fn api_screenshot(req: &mut tiny_http::Request, ctx: &Ctx) -> ResponseBox {
+    let raw = req.url().to_string();
+    let mut label = String::new();
+    if let Some(q) = raw.split('?').nth(1) {
+        for kv in q.split('&') {
+            if let Some(v) = kv.strip_prefix("name=") {
+                label = url_decode(v);
+            }
+        }
+    }
+    let mut bytes = Vec::new();
+    if req.as_reader().read_to_end(&mut bytes).is_err() || bytes.is_empty() {
+        return text(400, "bad body");
+    }
+    // Basic PNG signature check.
+    if bytes.len() < 8 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+        return text(400, "not a png");
+    }
+    if let Err(e) = std::fs::create_dir_all(&ctx.screenshot_dir) {
+        return text(500, &format!("mkdir: {e}"));
+    }
+    let slug = sanitize_label(&label);
+    let stamp = file_stamp(&bytes);
+    let name = format!("{slug}_{stamp}.png");
+    let path = ctx.screenshot_dir.join(&name);
+    match std::fs::write(&path, &bytes) {
+        Ok(()) => {
+            tracing::info!(path = %path.display(), "saved screenshot");
+            json_response(&serde_json::json!({
+                "ok": true,
+                "path": path.to_string_lossy(),
+                "name": name,
+            }))
+        }
+        Err(e) => text(500, &format!("write: {e}")),
+    }
+}
+
 fn api_clip_status(ctx: &Ctx, job: &str) -> ResponseBox {
     let state = ctx.clips.lock().unwrap().get(job).cloned();
     match state {
@@ -473,6 +522,87 @@ fn safe_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
         && !s.contains("..")
+}
+
+/// Turn a free-form label into a safe filename stem (keeps unicode letters).
+fn sanitize_label(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let trimmed = cleaned.trim_matches('_');
+    if trimmed.is_empty() {
+        "shot".into()
+    } else {
+        trimmed.chars().take(60).collect()
+    }
+}
+
+/// `YYYYMMDD_HHMMSS_xxxx` in local time, with a short content hash so two shots
+/// in the same second don't collide.
+fn file_stamp(bytes: &[u8]) -> String {
+    use time::OffsetDateTime;
+    let now = OffsetDateTime::now_utc();
+    let now = time::UtcOffset::current_local_offset()
+        .map(|o| now.to_offset(o))
+        .unwrap_or(now);
+    format!(
+        "{:04}{:02}{:02}_{:02}{:02}{:02}_{:04x}",
+        now.year(),
+        now.month() as u8,
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second(),
+        short_hash(bytes),
+    )
+}
+
+fn short_hash(bytes: &[u8]) -> u16 {
+    let mut h: u32 = 2_166_136_261;
+    for (i, b) in bytes.iter().enumerate().step_by(257) {
+        h = (h ^ *b as u32).wrapping_mul(16_777_619).wrapping_add(i as u32);
+    }
+    (h & 0xffff) as u16
+}
+
+/// Minimal percent-decoding for query values (`%20`, `+`).
+fn url_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => match (hex_val(b[i + 1]), hex_val(b[i + 2])) {
+                (Some(h), Some(l)) => {
+                    out.push(h * 16 + l);
+                    i += 3;
+                }
+                _ => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn local_ipv4() -> Option<String> {

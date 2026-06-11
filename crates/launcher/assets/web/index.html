@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Rokugakun — Recordings</title>
+  <title>rokugakun — Recordings</title>
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/hls.min.js"></script>
 </head>
 <body>
   <header>
     <span class="logo" aria-hidden="true"></span>
-    <h1 id="title">Rokugakun</h1>
+    <h1 id="title">rokugakun</h1>
     <button id="back" class="hidden">← Back</button>
   </header>
 
@@ -19,17 +19,48 @@
 
     <section id="player" class="hidden">
       <div id="banner" class="banner hidden"></div>
-      <video id="video" controls playsinline></video>
-      <div class="bar">
-        <button id="snap">📷 Screenshot</button>
-        <span class="sep"></span>
-        <button id="setin">IN</button>
-        <span id="inout">IN -- / OUT --</span>
-        <button id="setout">OUT</button>
-        <label><input type="checkbox" id="reenc" checked> Accurate (re-encode)</label>
-        <button id="clip" class="primary">✂ Clip</button>
-        <span id="clipmsg"></span>
+
+      <div class="stage" id="stage">
+        <video id="video" playsinline></video>
+
+        <div class="controls" id="controls">
+          <div class="seek" id="seek">
+            <div class="seek-buffered" id="buffered"></div>
+            <div class="seek-clip hidden" id="clipRange"></div>
+            <div class="seek-played" id="played"></div>
+            <div class="seek-thumb" id="thumb"></div>
+            <div class="handle hidden" id="handleIn" title="Clip start"></div>
+            <div class="handle hidden" id="handleOut" title="Clip end"></div>
+          </div>
+          <div class="ctl-row">
+            <button id="play" class="icon" title="Play/Pause (k)">▶</button>
+            <button id="mute" class="icon" title="Mute (m)">🔊</button>
+            <input type="range" id="vol" class="vol" min="0" max="1" step="0.05" value="1">
+            <span id="time" class="time">0:00 / 0:00</span>
+            <span class="spacer"></span>
+            <button id="snap" class="icon" title="Screenshot (s)">📷</button>
+            <button id="clipToggle" class="icon" title="Clip mode (c)">✂</button>
+            <button id="full" class="icon" title="Fullscreen (f)">⛶</button>
+          </div>
+        </div>
       </div>
+
+      <div id="clipPanel" class="clip-panel hidden">
+        <div class="clip-head">
+          <strong>Clip</strong>
+          <span id="clipInfo" class="muted">drag the handles on the timeline, or use the buttons</span>
+        </div>
+        <div class="clip-actions">
+          <button id="setin">Set IN = now</button>
+          <button id="setout">Set OUT = now</button>
+          <button id="playclip">▶ Preview</button>
+          <label><input type="checkbox" id="reenc" checked> Accurate (re-encode)</label>
+          <button id="export" class="primary">⬇ Export clip</button>
+          <span id="clipmsg" class="muted"></span>
+        </div>
+      </div>
+
+      <div id="shotmsg" class="shotmsg"></div>
     </section>
   </main>
 
