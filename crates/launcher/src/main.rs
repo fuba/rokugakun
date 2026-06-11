@@ -831,12 +831,19 @@ impl eframe::App for LauncherApp {
             });
 
         // Global settings as a floating window (toggled from the top bar).
+        // Anchored to the centre and height-capped to the screen, with an
+        // internal scroll area, so it never spills off-window.
         if self.show_settings {
             let mut open = true;
+            let screen_h = ctx.screen_rect().height();
             egui::Window::new("Settings (global preset)")
                 .open(&mut open)
-                .default_width(400.0)
                 .collapsible(false)
+                .resizable(true)
+                .vscroll(true)
+                .default_width(440.0)
+                .max_height(screen_h - 64.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| self.settings_section(ui));
             if !open {
                 self.show_settings = false;

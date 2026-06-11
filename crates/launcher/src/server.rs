@@ -10,9 +10,10 @@
 
 use rec_core::store::Store;
 use std::collections::HashSet;
+use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -34,7 +35,8 @@ struct Ctx {
 
 #[derive(Clone)]
 enum ClipState {
-    Running,
+    /// In progress, with a 0.0..=1.0 fraction (from ffmpeg `-progress`).
+    Running(f32),
     Done(PathBuf),
     Failed(String),
 }
@@ -323,7 +325,7 @@ fn serve_cache_file(ctx: &Ctx, sub: &str, id: &str, file: &str) -> ResponseBox {
 // ---- clip + screenshot ----------------------------------------------------
 
 fn api_clip(req: &mut tiny_http::Request, ctx: &Ctx) -> ResponseBox {
-    // body: {session_id, start_ms, end_ms, mode}
+    // body: {session_id, start_ms, end_ms, mode, title}
     let mut body = String::new();
     if req.as_reader().read_to_string(&mut body).is_err() {
         return text(400, "bad body");
@@ -335,6 +337,7 @@ fn api_clip(req: &mut tiny_http::Request, ctx: &Ctx) -> ResponseBox {
     let start = v["start_ms"].as_i64().unwrap_or(0).max(0);
     let end = v["end_ms"].as_i64().unwrap_or(0);
     let reencode = v["mode"].as_str() != Some("copy");
+    let title = v["title"].as_str().unwrap_or("clip");
     if sid.is_empty() || end <= start {
         return text(400, "bad params");
     }
@@ -355,26 +358,57 @@ fn api_clip(req: &mut tiny_http::Request, ctx: &Ctx) -> ResponseBox {
     let job = format!("clip{}", ctx.clip_seq.fetch_add(1, Ordering::Relaxed));
     let clips_dir = ctx.storage_root.join("_clips");
     let _ = std::fs::create_dir_all(&clips_dir);
-    let out = clips_dir.join(format!("{job}.mp4"));
-    ctx.clips.lock().unwrap().insert(job.clone(), ClipState::Running);
+
+    // Output filename: "<title>_<start-clock>.mp4" (e.g. Shadowverse_00-12-34.mp4),
+    // de-duplicated with a numeric suffix if it already exists.
+    let base = format!("{}_{}", sanitize_label(title), clock_label(start));
+    let mut out = clips_dir.join(format!("{base}.mp4"));
+    let mut n = 2;
+    while out.exists() {
+        out = clips_dir.join(format!("{base}_{n}.mp4"));
+        n += 1;
+    }
+    ctx.clips.lock().unwrap().insert(job.clone(), ClipState::Running(0.0));
 
     let input = format!("concat:{}", paths.join("|"));
     let start_s = format!("{:.3}", start as f64 / 1000.0);
-    let dur_s = format!("{:.3}", (end - start) as f64 / 1000.0);
+    let total_ms = (end - start).max(1);
+    let dur_s = format!("{:.3}", total_ms as f64 / 1000.0);
     let ffmpeg = ctx.ffmpeg.clone();
     let clips = ctx.clips.clone();
     let out2 = out.clone();
     let job2 = job.clone();
     std::thread::spawn(move || {
         let mut cmd = Command::new(&ffmpeg);
-        cmd.args(["-y", "-loglevel", "error", "-ss", &start_s, "-i", &input, "-t", &dur_s]);
+        cmd.args([
+            "-y", "-nostats", "-loglevel", "error", "-progress", "pipe:1",
+            "-ss", &start_s, "-i", &input, "-t", &dur_s,
+        ]);
         if reencode {
             cmd.args(["-c:v", "hevc_nvenc", "-preset", "p5", "-b:v", "30M", "-c:a", "aac"]);
         } else {
             cmd.args(["-c", "copy"]);
         }
         cmd.args(["-movflags", "+faststart", out2.to_str().unwrap_or("clip.mp4")]);
-        let state = match cmd.status() {
+        cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                clips.lock().unwrap().insert(job2, ClipState::Failed(e.to_string()));
+                return;
+            }
+        };
+        // Parse ffmpeg's `-progress` stream for `out_time_us` → fraction done.
+        if let Some(stdout) = child.stdout.take() {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.trim().parse::<i64>().ok()) {
+                    let frac = ((us as f64 / 1000.0) / total_ms as f64).clamp(0.0, 1.0) as f32;
+                    clips.lock().unwrap().insert(job2.clone(), ClipState::Running(frac));
+                }
+            }
+        }
+        let state = match child.wait() {
             Ok(s) if s.success() => ClipState::Done(out2),
             Ok(s) => ClipState::Failed(format!("ffmpeg exit {s}")),
             Err(e) => ClipState::Failed(e.to_string()),
@@ -429,21 +463,30 @@ fn api_screenshot(req: &mut tiny_http::Request, ctx: &Ctx) -> ResponseBox {
 fn api_clip_status(ctx: &Ctx, job: &str) -> ResponseBox {
     let state = ctx.clips.lock().unwrap().get(job).cloned();
     match state {
-        Some(ClipState::Running) => json_response(&serde_json::json!({"status":"running"})),
+        Some(ClipState::Running(p)) => {
+            json_response(&serde_json::json!({"status":"running","progress": p}))
+        }
         Some(ClipState::Done(p)) => {
             let name = p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            json_response(&serde_json::json!({"status":"done","url":format!("/clips/{name}")}))
+            // Serve by job id (ascii-safe); the unicode filename is conveyed in
+            // `name` for the browser's download attribute.
+            json_response(&serde_json::json!({
+                "status":"done", "url": format!("/clips/{job}"), "name": name,
+            }))
         }
         Some(ClipState::Failed(e)) => json_response(&serde_json::json!({"status":"failed","error":e})),
         None => text(404, "no such job"),
     }
 }
 
-fn serve_clip(ctx: &Ctx, file: &str) -> ResponseBox {
-    if !safe_name(file) {
-        return text(400, "bad name");
-    }
-    serve_file(&ctx.storage_root.join("_clips").join(file), "video/mp4")
+/// Serve a finished clip by its job id (looked up in the clips map, so no path
+/// is taken from the URL and unicode filenames stay safe).
+fn serve_clip(ctx: &Ctx, job: &str) -> ResponseBox {
+    let path = match ctx.clips.lock().unwrap().get(job) {
+        Some(ClipState::Done(p)) => p.clone(),
+        _ => return text(404, "not ready"),
+    };
+    serve_file(&path, "video/mp4")
 }
 
 fn api_frame(ctx: &Ctx, raw_url: &str) -> ResponseBox {
@@ -522,6 +565,12 @@ fn safe_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
         && !s.contains("..")
+}
+
+/// `HH-MM-SS` from a millisecond offset, for clip filenames.
+fn clock_label(ms: i64) -> String {
+    let s = (ms / 1000).max(0);
+    format!("{:02}-{:02}-{:02}", s / 3600, (s % 3600) / 60, s % 60)
 }
 
 /// Turn a free-form label into a safe filename stem (keeps unicode letters).

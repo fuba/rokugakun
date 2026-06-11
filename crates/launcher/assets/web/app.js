@@ -298,17 +298,32 @@ function renderClip() {
 
 async function exportClip() {
   if (inMs == null || outMs == null || outMs <= inMs) { $("clipmsg").textContent = "Set IN and OUT first"; return; }
-  $("clipmsg").textContent = "Exporting…";
-  const body = { session_id: curSession, start_ms: Math.floor(inMs), end_ms: Math.floor(outMs), mode: $("reenc").checked ? "reencode" : "copy" };
+  const bar = $("clipbar"), msg = $("clipmsg");
+  const reenc = $("reenc").checked;
+  bar.classList.remove("hidden"); bar.value = 0;
+  msg.textContent = reenc ? "Exporting… 0%" : "Exporting…";
+  const body = {
+    session_id: curSession, start_ms: Math.floor(inMs), end_ms: Math.floor(outMs),
+    mode: reenc ? "reencode" : "copy", title: curLabel,
+  };
   const res = await fetch("/api/clip", { method: "POST", body: JSON.stringify(body) }).then(r => r.json()).catch(() => ({}));
-  if (!res.job) { $("clipmsg").textContent = "Failed to start"; return; }
-  for (let i = 0; i < 1800; i++) {
+  if (!res.job) { msg.textContent = "Failed to start"; bar.classList.add("hidden"); return; }
+  for (let i = 0; i < 3600; i++) {
     const st = await fetch(`/api/clip/${res.job}`).then(r => r.json()).catch(() => ({}));
-    if (st.status === "done") { $("clipmsg").innerHTML = `Done: <a class="dl" href="${st.url}" download>Download</a>`; return; }
-    if (st.status === "failed") { $("clipmsg").textContent = "Failed: " + (st.error || ""); return; }
-    await sleep(1000);
+    if (st.status === "running") {
+      const pct = Math.round((st.progress || 0) * 100);
+      bar.value = pct; msg.textContent = `Exporting… ${pct}%`;
+    } else if (st.status === "done") {
+      bar.value = 100; bar.classList.add("hidden");
+      const name = st.name || "clip.mp4";
+      msg.innerHTML = `Saved <code>${name}</code> — <a class="dl" href="${st.url}" download="${name}">download</a>`;
+      return;
+    } else if (st.status === "failed") {
+      bar.classList.add("hidden"); msg.textContent = "Failed: " + (st.error || ""); return;
+    }
+    await sleep(500);
   }
-  $("clipmsg").textContent = "Timed out";
+  bar.classList.add("hidden"); msg.textContent = "Timed out";
 }
 
 // ---- screenshot (sent to the app daemon, saved in the configured folder) --

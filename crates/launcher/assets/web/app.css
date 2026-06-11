@@ -146,4 +146,7 @@ p.empty { color: var(--muted); padding: 0 18px; }
 label { color: var(--muted); font-size: 13.5px; display: inline-flex; align-items: center; gap: 5px; }
 input[type="checkbox"] { accent-color: var(--accent); }
 a.dl { color: var(--link); font-weight: 600; }
+.clipbar { width: 160px; height: 9px; vertical-align: middle; accent-color: var(--accent); }
+.clipbar::-webkit-progress-bar { background: #2a2f3a; border-radius: 5px; }
+.clipbar::-webkit-progress-value { background: var(--accent); border-radius: 5px; }
 .shotmsg { margin: 6px 18px 16px; color: var(--muted); font-size: 13.5px; min-height: 1em; }

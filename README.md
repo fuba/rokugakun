@@ -96,4 +96,14 @@ The web viewer bundles [hls.js](https://github.com/video-dev/hls.js)
 
 ## License
 
-[MIT](LICENSE)
+rokugakun is released under the [MIT License](LICENSE).
+
+It builds on open-source Rust crates and bundles a few web assets, all under
+permissive licenses (MIT, Apache-2.0, BSD, ISC, Zlib, etc.) — there is no
+GPL/LGPL or other copyleft code in the distributed binary. See
+[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) for the full attribution list
+and license texts.
+
+FFmpeg is **not** bundled — rokugakun calls it as an external program if it is
+present — so FFmpeg's own license does not apply to rokugakun. HEVC/H.264 codec
+patent licensing for your use is your responsibility.
