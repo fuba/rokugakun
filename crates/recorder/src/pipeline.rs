@@ -70,7 +70,7 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
 
     // For non-fullscreen windows, crop to the client area (exclude title bar /
     // borders). None for fullscreen/borderless or monitor capture.
-    let client_crop = if fallback_done {
+    let mut client_crop = if fallback_done {
         None
     } else {
         compute_client_crop(window_handle)
@@ -83,8 +83,8 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
         Some(r) => ((r.right - r.left).max(2) as u32, (r.bottom - r.top).max(2) as u32),
         None => wgc.size(),
     };
-    let out_w = (p.video.width as u32).min(eff_w.max(2)) & !1;
-    let out_h = (p.video.height as u32).min(eff_h.max(2)) & !1;
+    let mut out_w = (p.video.width as u32).min(eff_w.max(2)) & !1;
+    let mut out_h = (p.video.height as u32).min(eff_h.max(2)) & !1;
     tracing::info!(
         eff_w, eff_h, cropped = client_crop.is_some(),
         preset_w = p.video.width, preset_h = p.video.height, out_w, out_h,
@@ -128,6 +128,12 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
     let retention = RetentionManager::new(&store, p.retention_max_bytes());
 
     let mut converter: Option<Nv12Converter> = None;
+    // Source size the current converter/encoder were built for; drives mid-session
+    // resolution-change handling. `pending_src` debounces transient sizes (e.g.
+    // while a window is being drag-resized) before committing a switch.
+    let mut cur_src: Option<(u32, u32)> = None;
+    let mut pending_src: Option<((u32, u32), Instant)> = None;
+    const RES_DEBOUNCE: Duration = Duration::from_millis(400);
     let mut grid = FrameGrid::default();
     let mut audio_buf: Vec<AudioFrame> = Vec::new();
     let mut base: Option<i64> = None;
@@ -149,18 +155,84 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
         while let Ok(raw) = frames.try_recv() {
             raw_count += 1;
             base.get_or_insert(raw.time_100ns);
-            let conv = match &converter {
-                Some(c) => c,
-                None => {
-                    // Crop only applies to per-window capture, not the monitor fallback.
-                    let crop = if fallback_done { None } else { client_crop };
-                    converter = Some(
-                        Nv12Converter::new(&d3d, raw.width, raw.height, out_w, out_h, crop)
-                            .with_context(|| format!("NV12 converter {}x{}", raw.width, raw.height))?,
-                    );
-                    converter.as_ref().unwrap()
+            let obs = (raw.width, raw.height);
+
+            if cur_src.is_none() {
+                // First frame: build the converter for this source size.
+                let crop = if fallback_done { None } else { client_crop };
+                converter = Some(
+                    Nv12Converter::new(&d3d, raw.width, raw.height, out_w, out_h, crop)
+                        .with_context(|| format!("NV12 converter {}x{}", raw.width, raw.height))?,
+                );
+                cur_src = Some(obs);
+            } else if cur_src != Some(obs) {
+                // Source resolution changed mid-session. Debounce transient sizes,
+                // then switch the encoder + segment (TS carries the new params).
+                let stable = match pending_src {
+                    Some((s, since)) if s == obs => since.elapsed() >= RES_DEBOUNCE,
+                    _ => {
+                        pending_src = Some((obs, Instant::now()));
+                        false
+                    }
+                };
+                if !stable {
+                    continue; // skip transitional frames until the size settles
                 }
-            };
+                pending_src = None;
+
+                // New crop + output size (capped to the preset, never upscaled).
+                let new_crop = if fallback_done { None } else { compute_client_crop(window_handle) };
+                let (e_w, e_h) = match &new_crop {
+                    Some(r) => ((r.right - r.left).max(2) as u32, (r.bottom - r.top).max(2) as u32),
+                    None => obs,
+                };
+                let nw = (p.video.width as u32).min(e_w.max(2)) & !1;
+                let nh = (p.video.height as u32).min(e_h.max(2)) & !1;
+
+                if (nw, nh) == (out_w, out_h) {
+                    // Output size unchanged (e.g. a windowed resize still capped by
+                    // the preset): just rebuild the converter; keep the segment.
+                    converter = Some(Nv12Converter::new(&d3d, obs.0, obs.1, out_w, out_h, new_crop)?);
+                    client_crop = new_crop;
+                    cur_src = Some(obs);
+                } else {
+                    tracing::info!(
+                        from_w = out_w, from_h = out_h, to_w = nw, to_h = nh,
+                        src_w = obs.0, src_h = obs.1,
+                        "resolution changed; switching encoder + segment"
+                    );
+                    // Flush the old encoder's tail into the current (old-res) segment.
+                    venc.flush(&mut vbuf)?;
+                    total_bytes += drain_to_writer(&mut writer, &mut vbuf, &mut abuf, true)?;
+                    emit_segment_events(&mut writer, &status);
+
+                    // Rebuild converter + encoder at the new resolution.
+                    converter = Some(Nv12Converter::new(&d3d, obs.0, obs.1, nw, nh, new_crop)?);
+                    let vcfg2 = VideoEncoderConfig {
+                        width: nw,
+                        height: nh,
+                        fps_num: p.video.fps as u32,
+                        fps_den: 1,
+                        bitrate_bps: (p.video.bitrate_mbps as u32) * 1_000_000,
+                        gop: p.gop_frames() as u32,
+                        cbr: matches!(p.video.rate_control, rec_core::preset::RateControl::Cbr),
+                    };
+                    venc = MfHevcEncoder::new(vcfg2, &d3d.device).context("HEVC encoder (resize)")?;
+
+                    // New parameter sets + a fresh segment starting at this resolution.
+                    writer.set_stream_params(venc.codec_private());
+                    writer.force_rotate();
+
+                    client_crop = new_crop;
+                    out_w = nw;
+                    out_h = nh;
+                    cur_src = Some(obs);
+                }
+            } else {
+                pending_src = None; // size matches; cancel any pending switch
+            }
+
+            let conv = converter.as_ref().unwrap();
             if let Some(dec) = grid.tick(raw.time_100ns) {
                 let nv12 = conv.convert(&raw.texture).context("NV12 convert")?;
                 venc.encode(
@@ -179,6 +251,9 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
                 wgc = mon;
                 frames = wgc.frames();
                 converter = None; // frame size changes
+                cur_src = None; // rebuild converter for the monitor source size
+                pending_src = None;
+                client_crop = None; // no client-area crop on the monitor fallback
             }
         }
 

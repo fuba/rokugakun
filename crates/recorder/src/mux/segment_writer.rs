@@ -55,6 +55,9 @@ pub struct SegmentWriter<'a> {
     next_index: i64,
     cur: Option<OpenSegment>,
     closed: Vec<ClosedSegment>,
+    /// Set when the next video keyframe must start a fresh segment (e.g. the
+    /// source resolution changed and new parameter sets are in effect).
+    force_rotate: bool,
 }
 
 impl<'a> SegmentWriter<'a> {
@@ -66,7 +69,19 @@ impl<'a> SegmentWriter<'a> {
             next_index: 1,
             cur: None,
             closed: Vec::new(),
+            force_rotate: false,
         }
+    }
+
+    /// Replace the HEVC parameter sets (VPS/SPS/PPS) written at each keyframe /
+    /// segment start — call when the encoder is rebuilt at a new resolution.
+    pub fn set_stream_params(&mut self, vps_sps_pps: Vec<u8>) {
+        self.muxer.set_hevc_params(vps_sps_pps);
+    }
+
+    /// Force the next video keyframe to begin a new segment (resolution change).
+    pub fn force_rotate(&mut self) {
+        self.force_rotate = true;
     }
 
     /// The id of the segment currently being written (excluded from retention).
@@ -87,12 +102,13 @@ impl<'a> SegmentWriter<'a> {
         if is_video && pkt.keyframe {
             match self.cur {
                 None => self.open_new(pkt.pts_90k)?,
-                Some(_) if self.should_rotate() => {
+                Some(_) if self.force_rotate || self.should_rotate() => {
                     self.close_current()?;
                     self.open_new(pkt.pts_90k)?;
                 }
                 Some(_) => {}
             }
+            self.force_rotate = false;
         }
 
         let Some(seg) = self.cur.as_mut() else {
@@ -324,6 +340,37 @@ mod tests {
         assert_eq!(segs[1].index_no, 2);
         // file names follow {slug}_{start}_{index}.ts
         assert!(segs[1].path.ends_with("Forza_20260608_221500_000002.ts"));
+    }
+
+    #[test]
+    fn force_rotate_splits_on_next_keyframe_below_thresholds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seeded_store();
+        // huge caps so only force_rotate can cause a split
+        let mut w = SegmentWriter::new(&store, stream_cfg(), params(dir.path().into(), 1 << 30, 3600));
+
+        // distinctive parameter-set markers so we can prove each segment carries
+        // the params that were in effect when it was written.
+        let param_b = vec![0u8, 0, 0, 1, 0x42, 0x02, 0xAB, 0xCD, 0xEF];
+        w.write_packet(&vkey(0)).unwrap(); // opens seg 1 (params A)
+        w.write_packet(&vdelta(1500)).unwrap();
+        // simulate a resolution change: new params + forced split
+        w.set_stream_params(param_b.clone());
+        w.force_rotate();
+        w.write_packet(&vkey(90_000)).unwrap(); // next keyframe -> new segment (params B)
+        w.write_packet(&vdelta(91_500)).unwrap();
+        w.finish().unwrap();
+
+        let segs = store.list_segments("sess").unwrap();
+        assert_eq!(segs.len(), 2, "force_rotate should split despite thresholds not met");
+        assert!(segs.iter().all(|s| s.closed));
+
+        // seg 2's bitstream must carry the new parameter sets; seg 1 must not.
+        let s1 = std::fs::read(&segs[0].path).unwrap();
+        let s2 = std::fs::read(&segs[1].path).unwrap();
+        let contains = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+        assert!(contains(&s2, &param_b), "new segment should embed the new parameter sets");
+        assert!(!contains(&s1, &param_b), "old segment must not contain the new parameter sets");
     }
 
     #[test]

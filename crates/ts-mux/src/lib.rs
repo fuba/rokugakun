@@ -85,6 +85,12 @@ impl TsMuxer {
         }
     }
 
+    /// Replace the HEVC parameter sets (VPS/SPS/PPS) emitted before each keyframe.
+    /// Used when the source resolution changes mid-session.
+    pub fn set_hevc_params(&mut self, vps_sps_pps: Vec<u8>) {
+        self.cfg.hevc_vps_sps_pps = vps_sps_pps;
+    }
+
     /// Emit PAT + PMT at the start of a new segment (spec §14 single-playable).
     pub fn begin_segment(&mut self, w: &mut impl Write) -> io::Result<()> {
         let pat = build_pat();

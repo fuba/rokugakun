@@ -337,4 +337,29 @@ mod tests {
         // codec_private may be empty until first output; just prove setup worked.
         let _ = enc.codec_private();
     }
+
+    #[test]
+    #[ignore = "requires NVENC/HEVC-capable GPU; run with --ignored"]
+    fn encoder_can_be_recreated_at_a_new_resolution() {
+        // Mid-session resolution changes drop the encoder and build a new one at
+        // the new size; prove a second MFT instantiates in the same process and
+        // yields its own parameter sets.
+        crate::win::init_mta();
+        crate::win::init_mf();
+        let d3d = D3dDevice::create().unwrap();
+        let mk = |w, h| VideoEncoderConfig {
+            width: w, height: h, fps_num: 60, fps_den: 1,
+            bitrate_bps: 20_000_000, gop: 120, cbr: true,
+        };
+
+        let a = MfHevcEncoder::new(mk(1280, 720), &d3d.device).expect("encoder A");
+        let pa = a.codec_private();
+        drop(a); // release the first MFT, as the pipeline does on a resize
+
+        let b = MfHevcEncoder::new(mk(1920, 1080), &d3d.device).expect("encoder B (recreate)");
+        let pb = b.codec_private();
+        assert!(!pb.is_empty(), "recreated encoder should expose parameter sets");
+        // The 1080p SPS differs from the 720p SPS.
+        assert_ne!(pa, pb, "parameter sets should reflect the new resolution");
+    }
 }
