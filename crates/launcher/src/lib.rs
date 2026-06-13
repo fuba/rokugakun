@@ -8,7 +8,11 @@ pub mod matcher;
 pub mod server;
 
 #[cfg(windows)]
+pub mod autostart;
+#[cfg(windows)]
 pub mod overlay;
+#[cfg(windows)]
+pub mod tray;
 
 #[cfg(windows)]
 pub mod process_util;

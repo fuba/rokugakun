@@ -25,6 +25,7 @@ time = { workspace = true }
 regex = "1"
 eframe = "0.28"
 egui = "0.28"
+raw-window-handle = "0.6"
 rfd = "0.14"
 tiny_http = "0.12"
 webbrowser = "1"

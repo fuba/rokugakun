@@ -54,20 +54,31 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    // `--tray` (used by the run-at-startup entry) boots straight into the tray
+    // with the window hidden.
+    let start_hidden = std::env::args().any(|a| a == "--tray" || a == "--minimized");
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([780.0, 620.0])
             .with_min_inner_size([560.0, 420.0])
+            .with_visible(!start_hidden)
             .with_icon(app_icon()),
         ..Default::default()
     };
     eframe::run_native(
         "rokugakun — game auto-recorder",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             install_japanese_fonts(&cc.egui_ctx);
             apply_theme(&cc.egui_ctx);
-            Ok(Box::new(LauncherApp::new()))
+            let mut app = LauncherApp::new();
+            #[cfg(windows)]
+            {
+                app.tray = Some(launcher::tray::start(cc.egui_ctx.clone()));
+            }
+            let _ = start_hidden;
+            Ok(Box::new(app))
         }),
     )
 }
@@ -295,6 +306,12 @@ struct LauncherApp {
     /// Blinking red recording indicator (top-right), live while recording.
     #[cfg(windows)]
     rec_indicator: Option<launcher::overlay::RecIndicator>,
+    /// Notification-area (system tray) icon; lives for the app's lifetime.
+    #[cfg(windows)]
+    tray: Option<launcher::tray::Tray>,
+    /// Whether we've handed the main-window HWND to the tray thread yet.
+    #[cfg(windows)]
+    hwnd_captured: bool,
     #[cfg(windows)]
     running_apps: Vec<session::RunningApp>,
     /// exe names already auto-triggered (re-armed when the app closes).
@@ -343,6 +360,10 @@ impl LauncherApp {
             viewer_server: None,
             #[cfg(windows)]
             rec_indicator: None,
+            #[cfg(windows)]
+            tray: None,
+            #[cfg(windows)]
+            hwnd_captured: false,
             #[cfg(windows)]
             running_apps: Vec::new(),
             auto_seen: HashSet::new(),
@@ -749,8 +770,31 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(windows)]
         {
+            // Hand the tray thread the real window handle on the first frame, so
+            // "Open" / "Quit" can drive the window at the OS level.
+            if self.tray.is_some() && !self.hwnd_captured {
+                use raw_window_handle::HasWindowHandle;
+                if let Ok(h) = _frame.window_handle() {
+                    if let raw_window_handle::RawWindowHandle::Win32(w) = h.as_raw() {
+                        launcher::tray::set_main_hwnd(w.hwnd.get());
+                        self.hwnd_captured = true;
+                    }
+                }
+            }
+
             self.poll_recording();
             self.poll_auto_record();
+
+            // Close button → hide to the tray instead of exiting, when enabled
+            // (unless the user picked "Quit" from the tray menu).
+            if ctx.input(|i| i.viewport().close_requested())
+                && self.tray.is_some()
+                && self.config.minimize_to_tray
+                && !launcher::tray::quit_requested()
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
         }
 
         #[cfg(windows)]
@@ -782,6 +826,15 @@ impl eframe::App for LauncherApp {
                         }
                         if ui.button("🌐 Web Viewer").on_hover_text("Open the browser viewer (seek bar / clip / screenshot)").clicked() {
                             self.open_browser("/");
+                        }
+                        #[cfg(windows)]
+                        if self.tray.is_some()
+                            && ui
+                                .button("Hide to Tray")
+                                .on_hover_text("Hide the window to the notification-area icon")
+                                .clicked()
+                        {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                         }
                     });
                 });
@@ -954,6 +1007,34 @@ impl LauncherApp {
             ui.end_row();
         });
         ui.weak("Screenshots taken in the web viewer are saved here on this PC.");
+
+        #[cfg(windows)]
+        {
+            ui.add_space(8.0);
+            ui.strong("Startup & tray");
+            let mut autostart = launcher::autostart::is_enabled();
+            if ui
+                .checkbox(&mut autostart, "Start with Windows (launches into the tray)")
+                .changed()
+            {
+                self.message = match launcher::autostart::set_enabled(autostart) {
+                    Ok(()) if autostart => "Will now start with Windows".into(),
+                    Ok(()) => "Removed from Windows startup".into(),
+                    Err(e) => format!("Failed to update startup setting: {e}"),
+                };
+            }
+            if ui
+                .checkbox(
+                    &mut self.config.minimize_to_tray,
+                    "Closing the window hides it to the tray",
+                )
+                .on_hover_text("The app keeps running in the notification area; Quit it from the tray menu")
+                .changed()
+            {
+                let _ = self.config.save(&self.config_path);
+            }
+            ui.weak("Double-click the tray icon to reopen; right-click it for Open / Quit.");
+        }
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {

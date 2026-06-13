@@ -66,6 +66,10 @@ pub struct AppConfig {
     /// `%USERPROFILE%\Pictures\Rokugakun`.
     #[serde(default = "default_screenshot_dir")]
     pub screenshot_dir: PathBuf,
+    /// When true, the window's close button hides to the notification-area
+    /// (tray) icon instead of exiting. Quit from the tray menu still exits.
+    #[serde(default)]
+    pub minimize_to_tray: bool,
 }
 
 fn default_preset() -> RecordingPreset {
@@ -79,6 +83,7 @@ impl Default for AppConfig {
             default_preset_id: "hevc_1440p60_high".into(),
             preset: default_preset(),
             screenshot_dir: default_screenshot_dir(),
+            minimize_to_tray: false,
         }
     }
 }
