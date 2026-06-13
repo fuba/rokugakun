@@ -83,11 +83,11 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
         Some(r) => ((r.right - r.left).max(2) as u32, (r.bottom - r.top).max(2) as u32),
         None => wgc.size(),
     };
-    let mut out_w = (p.video.width as u32).min(eff_w.max(2)) & !1;
-    let mut out_h = (p.video.height as u32).min(eff_h.max(2)) & !1;
+    let (mut out_w, mut out_h) = output_size(p, eff_w, eff_h);
     tracing::info!(
         eff_w, eff_h, cropped = client_crop.is_some(),
         preset_w = p.video.width, preset_h = p.video.height, out_w, out_h,
+        mode = ?p.video.resolution_mode,
         "capture source -> encoder output size"
     );
 
@@ -186,8 +186,7 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
                     Some(r) => ((r.right - r.left).max(2) as u32, (r.bottom - r.top).max(2) as u32),
                     None => obs,
                 };
-                let nw = (p.video.width as u32).min(e_w.max(2)) & !1;
-                let nh = (p.video.height as u32).min(e_h.max(2)) & !1;
+                let (nw, nh) = output_size(p, e_w, e_h);
 
                 if (nw, nh) == (out_w, out_h) {
                     // Output size unchanged (e.g. a windowed resize still capped by
@@ -201,28 +200,11 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
                         src_w = obs.0, src_h = obs.1,
                         "resolution changed; switching encoder + segment"
                     );
-                    // Flush the old encoder's tail into the current (old-res) segment.
-                    venc.flush(&mut vbuf)?;
-                    total_bytes += drain_to_writer(&mut writer, &mut vbuf, &mut abuf, true)?;
-                    emit_segment_events(&mut writer, &status);
-
-                    // Rebuild converter + encoder at the new resolution.
+                    total_bytes += switch_encoder_resolution(
+                        p, &d3d, nw, nh, &mut venc, &mut writer, &mut vbuf, &mut abuf, &status,
+                    )?;
+                    // Rebuild the converter for the new source→output mapping.
                     converter = Some(Nv12Converter::new(&d3d, obs.0, obs.1, nw, nh, new_crop)?);
-                    let vcfg2 = VideoEncoderConfig {
-                        width: nw,
-                        height: nh,
-                        fps_num: p.video.fps as u32,
-                        fps_den: 1,
-                        bitrate_bps: (p.video.bitrate_mbps as u32) * 1_000_000,
-                        gop: p.gop_frames() as u32,
-                        cbr: matches!(p.video.rate_control, rec_core::preset::RateControl::Cbr),
-                    };
-                    venc = MfHevcEncoder::new(vcfg2, &d3d.device).context("HEVC encoder (resize)")?;
-
-                    // New parameter sets + a fresh segment starting at this resolution.
-                    writer.set_stream_params(venc.codec_private());
-                    writer.force_rotate();
-
                     client_crop = new_crop;
                     out_w = nw;
                     out_h = nh;
@@ -254,6 +236,26 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
                 cur_src = None; // rebuild converter for the monitor source size
                 pending_src = None;
                 client_crop = None; // no client-area crop on the monitor fallback
+
+                // The monitor is (almost always) far larger than the splash/window
+                // we first sized the encoder for — e.g. Forza's tiny launcher
+                // splash. Recompute the output size from the monitor and rebuild
+                // the encoder, so we don't squash the whole desktop into the tiny
+                // initial resolution and then never recover.
+                let (mw, mh) = wgc.size();
+                let (nw, nh) = output_size(p, mw, mh);
+                if (nw, nh) != (out_w, out_h) {
+                    tracing::info!(
+                        from_w = out_w, from_h = out_h, to_w = nw, to_h = nh,
+                        mon_w = mw, mon_h = mh,
+                        "monitor fallback: resizing encoder output"
+                    );
+                    total_bytes += switch_encoder_resolution(
+                        p, &d3d, nw, nh, &mut venc, &mut writer, &mut vbuf, &mut abuf, &status,
+                    )?;
+                    out_w = nw;
+                    out_h = nh;
+                }
             }
         }
 
@@ -297,6 +299,56 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
         size_bytes: Some(total_bytes),
     });
     Ok(())
+}
+
+/// Encoder output size for a given (cropped) source size, honoring the preset's
+/// resolution mode. Always even. `AutoFit` caps at the preset and never
+/// upscales; `Fixed` always uses the preset width×height.
+fn output_size(p: &RecordingPreset, eff_w: u32, eff_h: u32) -> (u32, u32) {
+    use rec_core::preset::ResolutionMode;
+    let (pw, ph) = (p.video.width as u32, p.video.height as u32);
+    match p.video.resolution_mode {
+        ResolutionMode::Fixed => (pw.max(2) & !1, ph.max(2) & !1),
+        ResolutionMode::AutoFit => (pw.min(eff_w.max(2)) & !1, ph.min(eff_h.max(2)) & !1),
+    }
+}
+
+/// Flush the current encoder, start a fresh segment, and rebuild the HEVC
+/// encoder at `nw`×`nh`. The caller still rebuilds the NV12 converter (it owns
+/// the source→output mapping) and updates its `out_w`/`out_h`. Returns the bytes
+/// drained into the closing segment.
+#[allow(clippy::too_many_arguments)]
+fn switch_encoder_resolution(
+    p: &RecordingPreset,
+    d3d: &D3dDevice,
+    nw: u32,
+    nh: u32,
+    venc: &mut MfHevcEncoder,
+    writer: &mut SegmentWriter,
+    vbuf: &mut Vec<EncodedPacket>,
+    abuf: &mut Vec<EncodedPacket>,
+    status: &Sender<RecorderMsg>,
+) -> Result<i64> {
+    // Flush the old encoder's tail into the current (old-res) segment, then close it.
+    venc.flush(vbuf)?;
+    let written = drain_to_writer(writer, vbuf, abuf, true)?;
+    emit_segment_events(writer, status);
+
+    let vcfg = VideoEncoderConfig {
+        width: nw,
+        height: nh,
+        fps_num: p.video.fps as u32,
+        fps_den: 1,
+        bitrate_bps: (p.video.bitrate_mbps as u32) * 1_000_000,
+        gop: p.gop_frames() as u32,
+        cbr: matches!(p.video.rate_control, rec_core::preset::RateControl::Cbr),
+    };
+    *venc = MfHevcEncoder::new(vcfg, &d3d.device).context("HEVC encoder (resize)")?;
+
+    // New parameter sets + a fresh segment starting at this resolution.
+    writer.set_stream_params(venc.codec_private());
+    writer.force_rotate();
+    Ok(written)
 }
 
 /// Merge buffered packets by DTS and write those safely past the reorder window.

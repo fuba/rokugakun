@@ -7,7 +7,7 @@ use eframe::egui;
 use rec_core::config::{AppConfig, AppPaths};
 use rec_core::domain::{Game, WindowRule};
 use rec_core::fsutil::now_ms;
-use rec_core::preset::{EncoderBackend, RateControl, RecordingPreset};
+use rec_core::preset::{EncoderBackend, RateControl, RecordingPreset, ResolutionMode};
 use rec_core::protocol::RecorderMsg;
 use rec_core::store::{RecentSession, Store};
 use std::collections::HashSet;
@@ -619,6 +619,26 @@ fn preset_editor(ui: &mut egui::Ui, p: &mut RecordingPreset) {
                             p.video.height = h;
                         }
                     }
+                });
+            ui.end_row();
+
+            ui.label("Resolution mode");
+            egui::ComboBox::from_id_source(ui.id().with("resmode"))
+                .selected_text(match p.video.resolution_mode {
+                    ResolutionMode::AutoFit => "Auto-fit (≤ preset)",
+                    ResolutionMode::Fixed => "Fixed (always preset)",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut p.video.resolution_mode,
+                        ResolutionMode::AutoFit,
+                        "Auto-fit — cap at preset, don't upscale",
+                    );
+                    ui.selectable_value(
+                        &mut p.video.resolution_mode,
+                        ResolutionMode::Fixed,
+                        "Fixed — always record at the preset size",
+                    );
                 });
             ui.end_row();
 

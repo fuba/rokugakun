@@ -23,6 +23,20 @@ pub enum RateControl {
     Vbr,
 }
 
+/// How the encoder output resolution relates to the captured source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionMode {
+    /// Cap output at the preset; never upscale a smaller source. Good for small
+    /// windowed games, but pins output to whatever the source first reports —
+    /// including a tiny launcher/splash window.
+    #[default]
+    AutoFit,
+    /// Always encode at the preset width×height, scaling the source to fit.
+    /// Robust against splash windows / odd initial sizes (e.g. Forza).
+    Fixed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoPreset {
     #[serde(default)]
@@ -39,6 +53,10 @@ pub struct VideoPreset {
     pub b_frames: i32,
     #[serde(default)]
     pub rate_control: RateControl,
+    /// How output resolution tracks the captured source. Defaults to AutoFit
+    /// for back-compat with existing config.json files.
+    #[serde(default)]
+    pub resolution_mode: ResolutionMode,
 }
 
 fn default_keyframe_interval() -> i32 {
@@ -123,6 +141,7 @@ impl RecordingPreset {
                 keyframe_interval_sec: 2,
                 b_frames: 0,
                 rate_control: RateControl::Cbr,
+                resolution_mode: ResolutionMode::AutoFit,
             },
             audio: AudioPreset {
                 codec: "aac".into(),
