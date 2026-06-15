@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ts_mux::StreamConfig;
 use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, MonitorFromWindow, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
@@ -99,6 +100,7 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
         bitrate_bps: (p.video.bitrate_mbps as u32) * 1_000_000,
         gop: p.gop_frames() as u32,
         cbr: matches!(p.video.rate_control, rec_core::preset::RateControl::Cbr),
+        backend: p.video.backend,
     };
     let mut venc = MfHevcEncoder::new(vcfg, &d3d.device).context("HEVC encoder")?;
     let mut aenc = MfAacEncoder::new(AudioEncoderConfig {
@@ -144,6 +146,25 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
     let started = Instant::now();
     let mut last_status = Instant::now();
 
+    // --- frame-drop instrumentation ---
+    // `channel_dropped` (frames the encoder never saw) is the loss that matters;
+    // `grid_dropped` is benign decimation when capture runs faster than 60fps.
+    let mut enc_total: u64 = 0;
+    let mut grid_drop_total: u64 = 0;
+    let mut chan_drop_total: u64 = 0;
+    let mut last_chan_seen: u64 = 0;
+    let mut stat_encoded: u64 = 0;
+    let mut stat_enc_ns_sum: u128 = 0;
+    let mut stat_enc_ns_max: u128 = 0;
+    let mut last_stats = Instant::now();
+    // Frames duplicated to fill skipped 60fps slots (≈ how far below 60 the
+    // source ran). `last_nv12` is the previous encoder-input frame, repeated
+    // into gaps. `last_frame_at` drives stall-based monitor fallback.
+    let mut dup_total: u64 = 0;
+    let mut stat_dup: u64 = 0;
+    let mut last_nv12: Option<ID3D11Texture2D> = None;
+    let mut last_frame_at = Instant::now();
+
     let _ = status.send(RecorderMsg::Status {
         state: "capturing".into(),
         duration_ms: Some(0),
@@ -154,6 +175,7 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
         // video
         while let Ok(raw) = frames.try_recv() {
             raw_count += 1;
+            last_frame_at = Instant::now();
             base.get_or_insert(raw.time_100ns);
             let obs = (raw.width, raw.height);
 
@@ -205,6 +227,7 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
                     )?;
                     // Rebuild the converter for the new source→output mapping.
                     converter = Some(Nv12Converter::new(&d3d, obs.0, obs.1, nw, nh, new_crop)?);
+                    last_nv12 = None; // old-resolution frame can't fill new-encoder gaps
                     client_crop = new_crop;
                     out_w = nw;
                     out_h = nh;
@@ -217,22 +240,63 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
             let conv = converter.as_ref().unwrap();
             if let Some(dec) = grid.tick(raw.time_100ns) {
                 let nv12 = conv.convert(&raw.texture).context("NV12 convert")?;
+
+                // Source ran below the grid rate: repeat the previous frame into
+                // the skipped slots so the output is true CFR (no playback judder).
+                if dec.duplicates > 0 {
+                    if let Some(prev) = &last_nv12 {
+                        let iv = grid.interval();
+                        // Cap the fill: past ~2s the source was static, so a held
+                        // frame is visually identical and we avoid a huge burst.
+                        let fill = (dec.duplicates as i64).min(120);
+                        for k in (1..=fill).rev() {
+                            venc.encode(
+                                GridFrame { texture: prev.clone(), pts_100ns: dec.pts_100ns - k * iv, width: out_w, height: out_h },
+                                &mut vbuf,
+                            )
+                            .context("HEVC encode (dup)")?;
+                            enc_total += 1;
+                            dup_total += 1;
+                            stat_dup += 1;
+                        }
+                    }
+                }
+
+                let t = Instant::now();
                 venc.encode(
-                    GridFrame { texture: nv12, pts_100ns: dec.pts_100ns, width: out_w, height: out_h },
+                    GridFrame { texture: nv12.clone(), pts_100ns: dec.pts_100ns, width: out_w, height: out_h },
                     &mut vbuf,
                 )
                 .context("HEVC encode")?;
+                let ns = t.elapsed().as_nanos();
+                stat_enc_ns_sum += ns;
+                stat_enc_ns_max = stat_enc_ns_max.max(ns);
+                stat_encoded += 1;
+                enc_total += 1;
+                last_nv12 = Some(nv12);
+            } else {
+                grid_drop_total += 1; // capture ran faster than the 60fps grid
             }
         }
-        // If per-window capture produced nothing, switch to whole-monitor capture.
-        if !fallback_done && raw_count < 3 && started.elapsed() > Duration::from_secs(2) {
+        // Switch to whole-monitor capture if per-window capture is unusable:
+        // either it never delivered frames, or it delivered a few (e.g. a splash
+        // window) then stalled early — the Forza case, where the real game window
+        // is not per-window-capturable. The stall check is gated to the first
+        // ~15s so a mid-game pause/alt-tab doesn't force a switch.
+        let no_frames = raw_count < 3 && started.elapsed() > Duration::from_secs(2);
+        let stalled_early = raw_count >= 3
+            && started.elapsed() < Duration::from_secs(15)
+            && last_frame_at.elapsed() > Duration::from_secs(3);
+        if !fallback_done && (no_frames || stalled_early) {
             fallback_done = true;
-            tracing::warn!("per-window capture delivered no frames; falling back to monitor");
+            let reason = if stalled_early { "frames stalled early" } else { "no frames" };
+            tracing::warn!(reason, "per-window capture unusable; falling back to monitor");
             let monitor = unsafe { MonitorFromWindow(window_handle, MONITOR_DEFAULTTOPRIMARY) };
             if let Ok(mon) = WgcCapture::for_monitor(monitor, &winrt) {
                 wgc = mon;
                 frames = wgc.frames();
                 converter = None; // frame size changes
+                last_nv12 = None;
                 cur_src = None; // rebuild converter for the monitor source size
                 pending_src = None;
                 client_crop = None; // no client-area crop on the monitor fallback
@@ -282,6 +346,36 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
             let _ = retention.cleanup(writer.active_segment_id());
         }
 
+        // Periodic frame-loss diagnostics (cheap; ~once every 2s).
+        if last_stats.elapsed() >= Duration::from_secs(2) {
+            let secs = last_stats.elapsed().as_secs_f64();
+            last_stats = Instant::now();
+            let chan = wgc.dropped_frames();
+            let chan_delta = chan.saturating_sub(last_chan_seen);
+            last_chan_seen = chan;
+            chan_drop_total += chan_delta;
+            let avg_ms = if stat_encoded > 0 {
+                stat_enc_ns_sum as f64 / stat_encoded as f64 / 1e6
+            } else {
+                0.0
+            };
+            tracing::info!(
+                fps = format_args!("{:.1}", stat_encoded as f64 / secs),
+                encoded = stat_encoded,
+                duplicated = stat_dup,
+                channel_dropped = chan_delta,
+                grid_dropped_total = grid_drop_total,
+                enc_avg_ms = format_args!("{:.2}", avg_ms),
+                enc_max_ms = format_args!("{:.2}", stat_enc_ns_max as f64 / 1e6),
+                out_w, out_h,
+                "recording stats"
+            );
+            stat_encoded = 0;
+            stat_dup = 0;
+            stat_enc_ns_sum = 0;
+            stat_enc_ns_max = 0;
+        }
+
         std::thread::sleep(Duration::from_millis(5));
     }
 
@@ -292,6 +386,19 @@ pub fn record(params: RecordParams, stop: Arc<AtomicBool>, status: Sender<Record
     writer.finish()?;
     emit_segment_events(&mut writer, &status);
     let _ = retention.cleanup(None);
+
+    // Final frame-loss summary for the session.
+    chan_drop_total += wgc.dropped_frames().saturating_sub(last_chan_seen);
+    let dur_s = started.elapsed().as_secs_f64();
+    tracing::info!(
+        frames_encoded = enc_total,
+        duplicated = dup_total,
+        channel_dropped = chan_drop_total,
+        grid_dropped = grid_drop_total,
+        avg_fps = format_args!("{:.1}", enc_total as f64 / dur_s.max(0.001)),
+        duration_s = format_args!("{:.1}", dur_s),
+        "recording finished: frame stats"
+    );
 
     let _ = status.send(RecorderMsg::Status {
         state: "stopped".into(),
@@ -342,6 +449,7 @@ fn switch_encoder_resolution(
         bitrate_bps: (p.video.bitrate_mbps as u32) * 1_000_000,
         gop: p.gop_frames() as u32,
         cbr: matches!(p.video.rate_control, rec_core::preset::RateControl::Cbr),
+        backend: p.video.backend,
     };
     *venc = MfHevcEncoder::new(vcfg, &d3d.device).context("HEVC encoder (resize)")?;
 

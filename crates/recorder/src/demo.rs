@@ -51,6 +51,7 @@ pub fn run(out_dir: &Path, seconds: u32) -> Result<PathBuf> {
         bitrate_bps: 20_000_000,
         gop: 120,
         cbr: true,
+        backend: rec_core::preset::EncoderBackend::Auto,
     };
     let mut venc = MfHevcEncoder::new(vcfg, &d3d.device)?;
 
@@ -236,6 +237,7 @@ pub fn run_live(out_dir: &Path, seconds: u32) -> Result<PathBuf> {
             bitrate_bps: 20_000_000,
             gop: 120,
             cbr: true,
+            backend: rec_core::preset::EncoderBackend::Auto,
         };
         let mut venc = MfHevcEncoder::new(vcfg, &d3d.device)?;
         // Created lazily once we know the real frame size (monitor resolution).

@@ -38,6 +38,11 @@ impl FrameGrid {
         }
     }
 
+    /// The grid slot duration in 100ns units (one frame at the grid's rate).
+    pub fn interval(&self) -> i64 {
+        self.interval
+    }
+
     /// Feed a capture timestamp (100ns). `None` means drop this frame.
     pub fn tick(&mut self, time_100ns: i64) -> Option<GridDecision> {
         let base = match self.base {

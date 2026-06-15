@@ -6,6 +6,7 @@
 //! pushed onto a channel for the grid/encoder to consume.
 
 use crossbeam_channel::{bounded, Receiver, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use windows::core::{IInspectable, Interface};
 use windows::Foundation::TypedEventHandler;
@@ -38,12 +39,20 @@ pub struct WgcCapture {
     session: GraphicsCaptureSession,
     rx: Receiver<RawFrame>,
     size: (u32, u32),
+    /// Frames the FrameArrived callback had to drop because the consumer channel
+    /// was full (i.e. the encode pipeline couldn't keep up).
+    dropped: Arc<AtomicU64>,
 }
 
 impl WgcCapture {
     /// The capture item's size (window or monitor), used to size the encoder.
     pub fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// Cumulative count of frames dropped because the channel was full.
+    pub fn dropped_frames(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Start capturing `hwnd`, rendering into `winrt_device`.
@@ -79,6 +88,8 @@ impl WgcCapture {
         unsafe impl Sync for Agile {}
         let device = Agile(winrt_device.clone());
         let last_size = Arc::new(Mutex::new((size.Width, size.Height)));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let dropped_cb = dropped.clone();
 
         let handler = TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
             move |sender, _| {
@@ -94,7 +105,11 @@ impl WgcCapture {
                             }
                         }
                         if let Ok(raw) = extract_frame(&frame) {
-                            let _ = tx.try_send(raw); // best-effort; drop if full
+                            // Best-effort; a full channel means the encoder fell
+                            // behind, so count the dropped frame for diagnostics.
+                            if tx.try_send(raw).is_err() {
+                                dropped_cb.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -115,6 +130,7 @@ impl WgcCapture {
             session,
             rx,
             size: (size.Width.max(0) as u32, size.Height.max(0) as u32),
+            dropped,
         })
     }
 

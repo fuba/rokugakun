@@ -30,6 +30,8 @@ pub struct VideoEncoderConfig {
     pub gop: u32,
     /// true = CBR, false = VBR (rate control mode).
     pub cbr: bool,
+    /// Which hardware vendor's encoder MFT to prefer (Auto = first available).
+    pub backend: rec_core::preset::EncoderBackend,
 }
 
 /// Video encoder producing Annex B HEVC packets (DTS=PTS, no B-frames).

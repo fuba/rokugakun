@@ -673,7 +673,13 @@ fn preset_editor(ui: &mut egui::Ui, p: &mut RecordingPreset) {
             egui::ComboBox::from_id_source(ui.id().with("enc"))
                 .selected_text(backend_label(p.video.backend))
                 .show_ui(ui, |ui| {
-                    for b in [EncoderBackend::Auto, EncoderBackend::MediaFoundation, EncoderBackend::Nvenc, EncoderBackend::Amf] {
+                    for b in [
+                        EncoderBackend::Auto,
+                        EncoderBackend::MediaFoundation,
+                        EncoderBackend::Nvenc,
+                        EncoderBackend::Qsv,
+                        EncoderBackend::Amf,
+                    ] {
                         ui.selectable_value(&mut p.video.backend, b, backend_label(b));
                     }
                 });
@@ -781,8 +787,9 @@ fn backend_label(b: EncoderBackend) -> &'static str {
     match b {
         EncoderBackend::Auto => "Auto",
         EncoderBackend::MediaFoundation => "Media Foundation",
-        EncoderBackend::Nvenc => "NVENC",
-        EncoderBackend::Amf => "AMF",
+        EncoderBackend::Nvenc => "NVENC (NVIDIA)",
+        EncoderBackend::Qsv => "Quick Sync (Intel)",
+        EncoderBackend::Amf => "AMF (AMD)",
     }
 }
 

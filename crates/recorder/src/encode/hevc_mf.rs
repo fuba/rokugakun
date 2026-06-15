@@ -9,6 +9,7 @@ use super::{VideoEncoder, VideoEncoderConfig};
 use crate::capture::GridFrame;
 use crate::mux::{EncodedPacket, StreamKind};
 use anyhow::{anyhow, Context, Result};
+use rec_core::preset::EncoderBackend;
 use rec_core::timebase::ns100_to_pts90k;
 use std::mem::ManuallyDrop;
 use windows::core::Interface;
@@ -36,7 +37,7 @@ impl MfHevcEncoder {
     pub fn new(cfg: VideoEncoderConfig, device: &ID3D11Device) -> Result<Self> {
         crate::win::init_mf();
 
-        let transform = enumerate_hardware_encoder()?;
+        let transform = enumerate_hardware_encoder(cfg.backend)?;
 
         // Unlock async hardware MFT.
         unsafe {
@@ -190,7 +191,35 @@ impl VideoEncoder for MfHevcEncoder {
 
 // ---------------------------------------------------------------------------
 
-fn enumerate_hardware_encoder() -> Result<IMFTransform> {
+/// Friendly-name substring identifying each vendor's encoder MFT. `None` =
+/// take whatever MFTEnumEx ranks first (Auto / generic MediaFoundation).
+fn vendor_keyword(backend: EncoderBackend) -> Option<&'static str> {
+    match backend {
+        EncoderBackend::Nvenc => Some("nvidia"),
+        EncoderBackend::Qsv => Some("intel"),
+        EncoderBackend::Amf => Some("amd"),
+        EncoderBackend::Auto | EncoderBackend::MediaFoundation => None,
+    }
+}
+
+/// The MFT's human-readable name (e.g. "NVIDIA H.265 Encoder MFT").
+unsafe fn friendly_name(activate: &IMFActivate) -> String {
+    let mut p = windows::core::PWSTR::null();
+    let mut len = 0u32;
+    if activate
+        .GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut p, &mut len)
+        .is_ok()
+        && !p.is_null()
+    {
+        let s = p.to_string().unwrap_or_default();
+        windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const _));
+        s
+    } else {
+        String::new()
+    }
+}
+
+fn enumerate_hardware_encoder(backend: EncoderBackend) -> Result<IMFTransform> {
     let output_info = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_HEVC,
@@ -217,9 +246,33 @@ fn enumerate_hardware_encoder() -> Result<IMFTransform> {
         }
 
         let slice = std::slice::from_raw_parts(activates, count as usize);
-        let activate = slice[0]
-            .clone()
-            .ok_or_else(|| anyhow!("null IMFActivate"))?;
+
+        // Prefer the requested vendor's MFT by friendly name; otherwise take the
+        // first (MFTEnumEx's ranking). Fall back to first if the vendor is absent.
+        let mut activate: Option<IMFActivate> = None;
+        let mut name = String::new();
+        if let Some(key) = vendor_keyword(backend) {
+            for a in slice.iter().flatten() {
+                let n = friendly_name(a);
+                if n.to_lowercase().contains(key) {
+                    activate = Some(a.clone());
+                    name = n;
+                    break;
+                }
+            }
+            if activate.is_none() {
+                tracing::warn!(?backend, "requested encoder vendor not found; using default MFT");
+            }
+        }
+        let activate = match activate {
+            Some(a) => a,
+            None => {
+                let a = slice[0].clone().ok_or_else(|| anyhow!("null IMFActivate"))?;
+                name = friendly_name(&a);
+                a
+            }
+        };
+        tracing::info!(encoder = %name, ?backend, "selected hardware HEVC MFT");
         let transform: IMFTransform = activate.ActivateObject()?;
 
         // Free the array allocated by MFTEnumEx.
@@ -331,6 +384,7 @@ mod tests {
             bitrate_bps: 20_000_000,
             gop: 120,
             cbr: true,
+            backend: EncoderBackend::Auto,
         };
         let enc = MfHevcEncoder::new(cfg, &d3d.device)
             .expect("hardware HEVC encoder should initialize on this GPU");
@@ -350,6 +404,7 @@ mod tests {
         let mk = |w, h| VideoEncoderConfig {
             width: w, height: h, fps_num: 60, fps_den: 1,
             bitrate_bps: 20_000_000, gop: 120, cbr: true,
+            backend: EncoderBackend::Auto,
         };
 
         let a = MfHevcEncoder::new(mk(1280, 720), &d3d.device).expect("encoder A");

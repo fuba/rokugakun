@@ -13,6 +13,8 @@ pub enum EncoderBackend {
     MediaFoundation,
     Nvenc,
     Amf,
+    /// Intel Quick Sync Video (Intel GPU hardware MFT).
+    Qsv,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
