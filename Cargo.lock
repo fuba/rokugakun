@@ -1984,7 +1984,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "launcher"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -2882,7 +2882,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rec-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -2898,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "recorder"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -3706,7 +3706,7 @@ dependencies = [
 
 [[package]]
 name = "ts-mux"
-version = "0.1.2"
+version = "0.2.0"
 
 [[package]]
 name = "ttf-parser"
